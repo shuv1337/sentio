@@ -8,6 +8,7 @@ pub mod domains;
 pub mod errors;
 pub mod health;
 pub mod inbound_routes;
+pub mod ingest;
 pub mod ip_pools;
 pub mod mailboxes;
 pub mod messages;
@@ -43,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/send-multipart", post(messages::send_multipart))
         .route("/send-batch", post(messages::send_batch))
         .route("/send-raw", post(messages::send_raw))
+        .route("/ingest", post(ingest::ingest_message))
         .route("/", get(messages::list_messages))
         .route("/{id}", get(messages::get_message))
         .route("/{id}/events", get(messages::get_message_events))

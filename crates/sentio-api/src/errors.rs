@@ -15,6 +15,7 @@ pub enum ApiError {
     Validation(String),
     Auth(String),
     RateLimit(String),
+    Unavailable(String),
     Internal(String),
 }
 
@@ -36,6 +37,7 @@ impl IntoResponse for ApiError {
             ApiError::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, "validation", msg),
             ApiError::Auth(msg) => (StatusCode::UNAUTHORIZED, "auth", msg),
             ApiError::RateLimit(msg) => (StatusCode::TOO_MANY_REQUESTS, "rate_limit", msg),
+            ApiError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", msg),
             ApiError::Internal(msg) => {
                 tracing::error!(error = %msg, "internal server error");
                 (

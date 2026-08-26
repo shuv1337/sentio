@@ -2102,6 +2102,72 @@
         ]
       }
     },
+    "/v1/messages/ingest": {
+      "post": {
+        "tags": [
+          "Messages"
+        ],
+        "operationId": "ingest_message",
+        "requestBody": {
+          "description": "JSON envelope + RFC 822 body, or Content-Type: message/rfc822 with X-Envelope-* headers",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_IngestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/messages/send": {
       "post": {
         "tags": [
@@ -6569,6 +6635,33 @@
           }
         }
       },
+      "DataResponse_IngestResponse": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "id",
+              "queue_id",
+              "status"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/MessageId"
+              },
+              "queue_id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "DataResponse_IpPoolResponse": {
         "type": "object",
         "required": [
@@ -10049,6 +10142,73 @@
             "$ref": "#/components/schemas/TenantId"
           },
           "webhook_url": {
+            "type": "string"
+          }
+        }
+      },
+      "IngestRequest": {
+        "type": "object",
+        "required": [
+          "envelope_from",
+          "envelope_to"
+        ],
+        "properties": {
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Original SMTP peer IP for SPF. Defaults to the HTTP client address."
+          },
+          "envelope_from": {
+            "type": "string",
+            "description": "SMTP MAIL FROM. Empty string is the null sender `<>`."
+          },
+          "envelope_to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "SMTP RCPT TO recipients. Every domain must be hosted by this tenant."
+          },
+          "helo_domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "EHLO/HELO name from the original SMTP session, if known."
+          },
+          "raw": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 822 message as a JSON string."
+          },
+          "raw_base64": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64-encoded RFC 822 when `raw` is not valid UTF-8."
+          }
+        }
+      },
+      "IngestResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "queue_id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/MessageId"
+          },
+          "queue_id": {
+            "type": "string"
+          },
+          "status": {
             "type": "string"
           }
         }

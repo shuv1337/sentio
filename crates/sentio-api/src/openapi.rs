@@ -13,6 +13,7 @@ use utoipa::{Modify, OpenApi};
         crate::routes::messages::send_message,
         crate::routes::messages::send_batch,
         crate::routes::messages::send_raw,
+        crate::routes::ingest::ingest_message,
         crate::routes::messages::send_multipart,
         crate::routes::messages::list_messages,
         crate::routes::messages::get_message,
