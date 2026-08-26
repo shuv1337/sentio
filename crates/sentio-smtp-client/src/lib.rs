@@ -4,6 +4,7 @@ pub mod delivery;
 pub mod dns;
 pub mod headers;
 pub mod pool;
+mod relay;
 pub mod tls;
 pub mod tracking;
 pub mod warmup;
