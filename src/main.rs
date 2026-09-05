@@ -680,11 +680,15 @@ async fn main() {
         })
     });
 
+    // One processor for SMTP DATA and HTTP ingest. `into_processor` wraps
+    // `InboundPipeline::process` — the same callback SMTP DATA completion
+    // already uses (SPF/DKIM/spam, mailbox, inbound routes).
+    let inbound_processor = pipeline.into_processor();
     let session_deps = sentio_smtp_server::SessionDeps {
         credential_lookup,
         on_auth_failure,
         on_auth_success,
-        message_processor: Some(pipeline.into_processor()),
+        message_processor: Some(inbound_processor.clone()),
         domain_check: Some(domain_check),
     };
 
@@ -730,7 +734,8 @@ async fn main() {
         blob_store,
         (*config).clone(),
     )
-    .with_kv(kv.clone());
+    .with_kv(kv.clone())
+    .with_inbound_processor(inbound_processor);
 
     let api_shutdown_rx = shutdown_rx.clone();
     let api_handle = tokio::spawn(async move {

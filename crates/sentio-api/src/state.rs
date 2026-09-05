@@ -8,6 +8,7 @@ use sqlx::PgPool;
 
 use sentio_core::config::SentioConfig;
 use sentio_queue::Publisher;
+use sentio_smtp_server::MessageProcessor;
 use sentio_storage::S3BlobStore;
 use sentio_store::RedisPool;
 
@@ -28,6 +29,10 @@ pub struct AppState {
     /// unauthenticated endpoints.
     pub ip_rate_limiter: Arc<KeyedRateLimiter>,
     pub kv: Option<RedisPool>,
+    /// Same callback SMTP DATA completion uses (`InboundPipeline::process`).
+    /// `None` when the API process is running without the inbound pipeline
+    /// (tests, `openapi` export).
+    pub inbound_processor: Option<MessageProcessor>,
 }
 
 /// Requests allowed per client IP per minute before authentication.
@@ -53,11 +58,17 @@ impl AppState {
             rate_limiter: Arc::new(rate_limiter),
             ip_rate_limiter: Arc::new(ip_rate_limiter),
             kv: None,
+            inbound_processor: None,
         }
     }
 
     pub fn with_kv(mut self, kv: RedisPool) -> Self {
         self.kv = Some(kv);
+        self
+    }
+
+    pub fn with_inbound_processor(mut self, processor: MessageProcessor) -> Self {
+        self.inbound_processor = Some(processor);
         self
     }
 }

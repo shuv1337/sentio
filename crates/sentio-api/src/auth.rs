@@ -17,6 +17,10 @@ use crate::state::AppState;
 pub struct AuthContext {
     pub tenant_id: TenantId,
     pub scopes: Vec<String>,
+    /// Set when the bearer matches `SENTIO_INGEST_TOKEN`. That token is
+    /// ingest-only (`messages:ingest`) and is not an API key, so recipient
+    /// domains are resolved globally the same way SMTP inbound does.
+    pub shared_ingest: bool,
 }
 
 impl AuthContext {
@@ -60,6 +64,14 @@ impl FromRequestParts<AppState> for AuthContext {
                 ApiError::Auth("invalid authorization format, expected Bearer token".into())
             })?;
 
+            if presented_bearer_is_ingest_token(token) {
+                return Ok(AuthContext {
+                    tenant_id: TenantId(uuid::Uuid::nil()),
+                    scopes: vec!["messages:ingest".into()],
+                    shared_ingest: true,
+                });
+            }
+
             // SHA-256 hash the token for lookup
             let key_hash = {
                 let mut hasher = Sha256::new();
@@ -76,6 +88,7 @@ impl FromRequestParts<AppState> for AuthContext {
                     return Ok(AuthContext {
                         tenant_id: record.tenant_id,
                         scopes: record.scopes,
+                        shared_ingest: false,
                     });
                 }
                 Err(sentio_core::error::SentioError::Auth(_)) => {}
@@ -100,6 +113,7 @@ impl FromRequestParts<AppState> for AuthContext {
                     Ok(AuthContext {
                         tenant_id: record.tenant_id,
                         scopes: record.scopes,
+                        shared_ingest: false,
                     })
                 }
                 // A token that matches no row is a client error, not an
@@ -120,6 +134,34 @@ impl FromRequestParts<AppState> for AuthContext {
             }
         }
     }
+}
+
+/// Env var whose value is accepted as a Bearer token on ingest.
+/// Distinct from API keys: it grants only `messages:ingest`.
+pub const INGEST_TOKEN_ENV: &str = "SENTIO_INGEST_TOKEN";
+
+fn presented_bearer_is_ingest_token(token: &str) -> bool {
+    token_equals_configured(token, std::env::var(INGEST_TOKEN_ENV).ok().as_deref())
+}
+
+fn token_equals_configured(presented: &str, configured: Option<&str>) -> bool {
+    match configured {
+        Some(expected) if !expected.is_empty() => {
+            constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        }
+        _ => false,
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -178,5 +220,24 @@ pub async fn warn_if_bootstrap_key_active(pool: &sqlx::PgPool) {
         Err(e) => {
             tracing::debug!(error = %e, "could not check bootstrap key status");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingest_token_unset_or_empty_never_matches() {
+        assert!(!token_equals_configured("anything", None));
+        assert!(!token_equals_configured("anything", Some("")));
+    }
+
+    #[test]
+    fn ingest_token_matches_only_exact_configured_value() {
+        const TOKEN: &str = "ingest-test-token";
+        assert!(token_equals_configured(TOKEN, Some(TOKEN)));
+        assert!(!token_equals_configured(TOKEN, Some("other-token")));
+        assert!(!token_equals_configured("ingest-test-toke", Some(TOKEN)));
     }
 }

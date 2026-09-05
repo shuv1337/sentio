@@ -375,7 +375,7 @@ fn strip_msgid_brackets(s: &str) -> &str {
 /// later in a DMARC report / dead-letter row. Display-name + brackets
 /// are unwrapped via `extract_addr_spec` before the per-character
 /// checks, so `"Alice" <alice@example.com>` validates fine.
-fn validate_email_field(field: &str, input: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_email_field(field: &str, input: &str) -> Result<(), ApiError> {
     // Header injection check runs on the raw input - a CRLF inside a
     // quoted display name is still a CRLF on the wire and would let an
     // attacker inject extra headers.
@@ -429,7 +429,7 @@ fn validate_email_list(field: &str, inputs: &[String]) -> Result<(), ApiError> {
 /// e.g. an API caller passing `"Alex · Team" <alex@example.com>` as the
 /// `from` field. This helper is the canonical way to derive
 /// envelope_from / envelope_to values from whatever the API caller wrote.
-fn extract_addr_spec(input: &str) -> String {
+pub(crate) fn extract_addr_spec(input: &str) -> String {
     let trimmed = input.trim();
     if let Some(open) = trimmed.rfind('<') {
         let after = &trimmed[open + 1..];
@@ -588,7 +588,7 @@ async fn validate_sender_domain(
 /// (`"Alice" <alice@example.com>`). The naive `rsplit_once('@')`
 /// returns `example.com>` for the bracketed form, which then fails
 /// domain lookup with a confusing trailing `>`. This handles both.
-fn parse_from_domain(from: &str) -> Option<String> {
+pub(crate) fn parse_from_domain(from: &str) -> Option<String> {
     let trimmed = from.trim();
     // Mailbox form: extract between the LAST '<' and matching '>'.
     let addr = if let Some(open) = trimmed.rfind('<') {
