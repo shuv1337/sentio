@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use base64::Engine;
 use bytes::BytesMut;
 use memchr::memchr;
 use sentio_core::error::{SentioError, SmtpError};
@@ -285,6 +286,66 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SmtpConnection<S> {
         self.command("STARTTLS").await
     }
 
+    /// Authenticate with SASL PLAIN (RFC 4616) using an initial response.
+    pub async fn auth_plain(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<SmtpResponse, SentioError> {
+        let mut payload = Vec::with_capacity(username.len() + password.len() + 2);
+        payload.push(0);
+        payload.extend_from_slice(username.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(password.as_bytes());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
+        self.command(&format!("AUTH PLAIN {b64}")).await
+    }
+
+    /// Authenticate with SASL LOGIN (draft-murchison-sasl-login).
+    pub async fn auth_login(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<SmtpResponse, SentioError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let resp = self.command("AUTH LOGIN").await?;
+        if resp.code != 334 {
+            return Ok(resp);
+        }
+        let user_b64 = b64.encode(username.as_bytes());
+        self.write_all(
+            format!("{user_b64}\r\n").as_bytes(),
+            self.config.command_timeout,
+        )
+        .await?;
+        let resp = self.read_response(self.config.command_timeout).await?;
+        if resp.code != 334 {
+            return Ok(resp);
+        }
+        let pass_b64 = b64.encode(password.as_bytes());
+        self.write_all(
+            format!("{pass_b64}\r\n").as_bytes(),
+            self.config.command_timeout,
+        )
+        .await?;
+        self.read_response(self.config.command_timeout).await
+    }
+
+    /// Authenticate using PLAIN if advertised, otherwise LOGIN.
+    pub async fn authenticate(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<SmtpResponse, SentioError> {
+        match select_auth_mechanism(self.capabilities.as_ref()) {
+            Some(ClientAuthMech::Plain) => self.auth_plain(username, password).await,
+            Some(ClientAuthMech::Login) => self.auth_login(username, password).await,
+            None => Err(smtp_err(
+                "server did not advertise a supported AUTH mechanism (PLAIN or LOGIN)",
+            )),
+        }
+    }
+
     /// Consume the connection, returning the inner stream and read buffer.
     /// Used to perform TLS upgrade on the underlying stream.
     pub fn into_parts(self) -> (S, BytesMut, ConnectionConfig, String) {
@@ -386,6 +447,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SmtpConnection<S> {
 
             self.read_buf.extend_from_slice(&tmp[..n]);
         }
+    }
+}
+
+enum ClientAuthMech {
+    Plain,
+    Login,
+}
+
+fn select_auth_mechanism(caps: Option<&ServerCapabilities>) -> Option<ClientAuthMech> {
+    let mechs = caps.map(|c| c.auth_mechanisms.as_slice()).unwrap_or(&[]);
+    let upper: Vec<String> = mechs.iter().map(|m| m.to_ascii_uppercase()).collect();
+    if upper.iter().any(|m| m == "PLAIN") {
+        Some(ClientAuthMech::Plain)
+    } else if upper.iter().any(|m| m == "LOGIN") {
+        Some(ClientAuthMech::Login)
+    } else {
+        None
     }
 }
 
@@ -761,5 +839,84 @@ mod tests {
         };
         assert!(resp_5xx.is_permanent());
         assert_eq!(resp_5xx.full_text(), "No such user\nCheck address");
+    }
+
+    #[test]
+    fn select_auth_prefers_plain_over_login() {
+        let caps = ServerCapabilities {
+            auth_mechanisms: vec!["CRAM-MD5".into(), "PLAIN".into(), "LOGIN".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_auth_mechanism(Some(&caps)),
+            Some(ClientAuthMech::Plain)
+        ));
+    }
+
+    #[test]
+    fn select_auth_falls_back_to_login() {
+        let caps = ServerCapabilities {
+            auth_mechanisms: vec!["LOGIN".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_auth_mechanism(Some(&caps)),
+            Some(ClientAuthMech::Login)
+        ));
+    }
+
+    #[test]
+    fn select_auth_none_without_plain_or_login() {
+        let caps = ServerCapabilities {
+            auth_mechanisms: vec!["CRAM-MD5".into()],
+            ..Default::default()
+        };
+        assert!(select_auth_mechanism(Some(&caps)).is_none());
+        assert!(select_auth_mechanism(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_plain_sends_rfc4616_initial_response() {
+        let (mut server, client) = duplex(8192);
+        server
+            .write_all(b"220 mx.example.com ESMTP\r\n")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+
+        let (mut conn, _) =
+            SmtpConnection::new(client, ConnectionConfig::default(), "test.local".into())
+                .await
+                .unwrap();
+
+        let handle = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let n = server.read(&mut buf).await.unwrap();
+            let cmd = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(
+                cmd.starts_with("AUTH PLAIN "),
+                "expected AUTH PLAIN, got {cmd:?}"
+            );
+            let b64 = cmd.trim().strip_prefix("AUTH PLAIN ").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap();
+            assert_eq!(decoded, b"\0relay-user\0relay-pass");
+            server
+                .write_all(b"235 2.7.0 Authentication succeeded\r\n")
+                .await
+                .unwrap();
+            server.flush().await.unwrap();
+            server
+        });
+
+        conn.capabilities = Some(ServerCapabilities {
+            auth_mechanisms: vec!["PLAIN".into(), "LOGIN".into()],
+            ..Default::default()
+        });
+        let resp = conn.authenticate("relay-user", "relay-pass").await.unwrap();
+        assert_eq!(resp.code, 235);
+        assert!(resp.is_success());
+        let _ = handle.await;
     }
 }

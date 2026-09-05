@@ -627,7 +627,6 @@ where
             }
         };
         let port = relay.port.unwrap_or(25);
-        let tls_mode = relay.tls_mode.as_deref().unwrap_or("opportunistic");
 
         // Resolve relay host address.
         let addr = match tokio::net::lookup_host(format!("{host}:{port}")).await {
@@ -686,173 +685,48 @@ where
             }
         };
 
-        // Create SMTP connection.
-        let (mut conn, _greeting) =
-            match SmtpConnection::new(tcp, conn_config, host.to_string()).await {
-                Ok(c) => c,
-                Err(e) => {
+        let auth_password = match (
+            relay.auth_username.as_ref(),
+            relay.auth_password_env.as_deref(),
+        ) {
+            (Some(_), Some(var)) => match std::env::var(var) {
+                Ok(password) => Some(password),
+                Err(_) => {
                     return DeliveryOutcome::Deferred {
-                        response: format!("Relay connection failed: {e}"),
+                        response: format!(
+                            "Relay AUTH password environment variable {var} is not set"
+                        ),
                         remote_mta: host.to_string(),
                         bounce_class: BounceClass::Soft,
                         retry_count,
                         next_retry_at: compute_next_retry(retry_count, &self.config),
                     };
                 }
-            };
-
-        // EHLO.
-        let ehlo_resp = match conn.ehlo(&self.hostname).await {
-            Ok(r) => r,
-            Err(e) => {
-                return DeliveryOutcome::Deferred {
-                    response: format!("Relay EHLO failed: {e}"),
+            },
+            (Some(_), None) => {
+                return DeliveryOutcome::Bounced {
+                    response: "Relay AUTH username is set but auth_password_env is missing".into(),
                     remote_mta: host.to_string(),
-                    bounce_class: BounceClass::Soft,
-                    retry_count,
-                    next_retry_at: compute_next_retry(retry_count, &self.config),
+                    bounce_class: BounceClass::Hard,
                 };
             }
+            (None, _) => None,
         };
-        if !ehlo_resp.is_success() {
-            return DeliveryOutcome::Deferred {
-                response: format!(
-                    "Relay EHLO rejected: {} {}",
-                    ehlo_resp.code,
-                    ehlo_resp.full_text()
-                ),
-                remote_mta: host.to_string(),
-                bounce_class: BounceClass::Soft,
-                retry_count,
-                next_retry_at: compute_next_retry(retry_count, &self.config),
-            };
-        }
 
-        // STARTTLS upgrade if requested and server supports it.
-        if tls_mode == "starttls" {
-            let caps = conn.capabilities.clone().unwrap_or_default();
-            if caps.starttls {
-                let starttls_resp = match conn.starttls().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(error = %e, "relay STARTTLS command failed");
-                        return DeliveryOutcome::Deferred {
-                            response: format!("Relay STARTTLS failed: {e}"),
-                            remote_mta: host.to_string(),
-                            bounce_class: BounceClass::Soft,
-                            retry_count,
-                            next_retry_at: compute_next_retry(retry_count, &self.config),
-                        };
-                    }
-                };
-                if starttls_resp.is_success() {
-                    let tls_req = crate::tls::TlsRequirement {
-                        policy: TlsPolicy::Opportunistic,
-                        dane_records: vec![],
-                        mta_sts_mx_patterns: vec![],
-                    };
-                    let tls_config = match build_client_config(&tls_req) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return DeliveryOutcome::Deferred {
-                                response: format!("Relay TLS config error: {e}"),
-                                remote_mta: host.to_string(),
-                                bounce_class: BounceClass::Soft,
-                                retry_count,
-                                next_retry_at: compute_next_retry(retry_count, &self.config),
-                            };
-                        }
-                    };
-                    let (stream, _buf, conn_config, hostname) = conn.into_parts();
-                    match starttls_upgrade(stream, Arc::new(tls_config), &hostname).await {
-                        Ok((tls_stream, _version)) => {
-                            let (mut tls_conn, _) = match SmtpConnection::new(
-                                tls_stream,
-                                conn_config,
-                                hostname,
-                            )
-                            .await
-                            {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    return DeliveryOutcome::Deferred {
-                                        response: format!("Relay TLS connection failed: {e}"),
-                                        remote_mta: host.to_string(),
-                                        bounce_class: BounceClass::Soft,
-                                        retry_count,
-                                        next_retry_at: compute_next_retry(
-                                            retry_count,
-                                            &self.config,
-                                        ),
-                                    };
-                                }
-                            };
-                            let ehlo_resp = match tls_conn.ehlo(&self.hostname).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    return DeliveryOutcome::Deferred {
-                                        response: format!("Relay post-TLS EHLO failed: {e}"),
-                                        remote_mta: host.to_string(),
-                                        bounce_class: BounceClass::Soft,
-                                        retry_count,
-                                        next_retry_at: compute_next_retry(
-                                            retry_count,
-                                            &self.config,
-                                        ),
-                                    };
-                                }
-                            };
-                            if !ehlo_resp.is_success() {
-                                return DeliveryOutcome::Deferred {
-                                    response: "Relay post-TLS EHLO rejected".into(),
-                                    remote_mta: host.to_string(),
-                                    bounce_class: BounceClass::Soft,
-                                    retry_count,
-                                    next_retry_at: compute_next_retry(retry_count, &self.config),
-                                };
-                            }
-                            // Send over TLS connection.
-                            return match self
-                                .send_message(
-                                    &mut tls_conn,
-                                    sender,
-                                    recipients,
-                                    message,
-                                    host,
-                                    dsn_ret,
-                                    dsn_envid,
-                                    dsn_notify,
-                                    dsn_orcpt,
-                                )
-                                .await
-                            {
-                                Ok(outcome) => outcome,
-                                Err(e) => DeliveryOutcome::Deferred {
-                                    response: format!("Relay TLS send failed: {e}"),
-                                    remote_mta: host.to_string(),
-                                    bounce_class: BounceClass::Soft,
-                                    retry_count,
-                                    next_retry_at: compute_next_retry(retry_count, &self.config),
-                                },
-                            };
-                        }
-                        Err(e) => {
-                            return DeliveryOutcome::Deferred {
-                                response: format!("Relay STARTTLS upgrade failed: {e}"),
-                                remote_mta: host.to_string(),
-                                bounce_class: BounceClass::Soft,
-                                retry_count,
-                                next_retry_at: compute_next_retry(retry_count, &self.config),
-                            };
-                        }
-                    }
-                }
-                // STARTTLS response not success - fall through to send without TLS.
-            }
-            // Server doesn't support STARTTLS - fall through to send without TLS.
-        }
+        let params = crate::relay::RelaySessionParams {
+            hostname: host.to_string(),
+            ehlo_hostname: self.hostname.clone(),
+            tls_mode: crate::relay::RelayTlsMode::from_config(relay.tls_mode.as_deref()),
+            auth_username: relay.auth_username.clone(),
+            auth_password,
+            conn_config,
+        };
 
-        // Send without TLS (tls_mode == "none" or STARTTLS unavailable).
+        let mut conn = match crate::relay::open_relay_session(tcp, &params).await {
+            Ok(conn) => conn,
+            Err(e) => return relay_session_outcome(e, host, retry_count, &self.config),
+        };
+
         match self
             .send_message(
                 &mut conn, sender, recipients, message, host, dsn_ret, dsn_envid, dsn_notify,
@@ -1589,6 +1463,33 @@ where
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Map a relay handshake error to a delivery outcome.
+/// 5xx SMTP codes (e.g. AUTH rejected) are permanent; timeouts and 4xx are deferred.
+fn relay_session_outcome(
+    e: SentioError,
+    host: &str,
+    retry_count: u32,
+    config: &DeliveryConfig,
+) -> DeliveryOutcome {
+    let response = format!("Relay connection failed: {e}");
+    if let SentioError::Smtp(smtp) = &e {
+        if (500..600).contains(&smtp.code) {
+            return DeliveryOutcome::Bounced {
+                response,
+                remote_mta: host.to_string(),
+                bounce_class: BounceClass::Hard,
+            };
+        }
+    }
+    DeliveryOutcome::Deferred {
+        response,
+        remote_mta: host.to_string(),
+        bounce_class: BounceClass::Soft,
+        retry_count,
+        next_retry_at: compute_next_retry(retry_count, config),
+    }
+}
 
 /// Classify an SMTP response into a delivery outcome.
 fn classify_response(resp: &SmtpResponse, remote_mta: &str) -> DeliveryOutcome {
